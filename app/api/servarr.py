@@ -113,13 +113,17 @@ def arr_queue(_: Annotated[str, Depends(verify_apikey)], db: Session = Depends(g
             "trackedDownloadStatus": "ok",
             "trackedDownloadState": "downloading",
             "timeleft": torrent.left_time or "",
-            "estimatedCompletionTime": datetime.now(timezone.utc).isoformat(),
+            "estimatedCompletionTime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
             "protocol": "torrent",
             "downloadClient": torrent.downloader or "MoviePilot",
             "downloadId": torrent.hash,
             "indexer": "",
+            # Radarr按movieId关联、Sonarr按seriesId关联。同一个/queue接口同时被Seerr的
+            # Radarr与Sonarr服务轮询，两个字段都填上，不适用的类型填0（不会匹配到任何媒体），
+            # 避免任一侧因字段缺失(undefined)而处理失败。
+            "movieId": 0,
+            "seriesId": 0,
         }
-        # Radarr按movieId关联、Sonarr按seriesId关联，按媒体类型设置对应字段
         if media.get("type") == MediaType.TV.value:
             record["seriesId"] = sub_id
         else:
