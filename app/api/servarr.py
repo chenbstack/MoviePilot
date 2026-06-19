@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Any, List, Annotated
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -5,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app import schemas
+from app.chain.download import DownloadChain
 from app.chain.media import MediaChain
 from app.chain.subscribe import SubscribeChain
 from app.chain.tvdb import TvdbChain
@@ -70,6 +72,66 @@ async def arr_system_status(_: Annotated[str, Depends(verify_apikey)]) -> Any:
         "packageAuthor": "jxxghp",
         "packageUpdateMechanism": "builtIn",
         "packageUpdateMechanismMessage": ""
+    }
+
+
+@arr_router.get("/queue", summary="下载队列")
+def arr_queue(_: Annotated[str, Depends(verify_apikey)], db: Session = Depends(get_db)) -> Any:
+    """
+    模拟Radarr、Sonarr下载队列
+    将MoviePilot正在下载的任务映射为Radarr/Sonarr队列项，供Seerr/Overseerr等的
+    下载跟踪器显示进度。Radarr按movieId关联、Sonarr按seriesId关联，这里把下载任务
+    对应的tmdbid映射回MoviePilot的订阅ID（即/movie、/series返回的id）。
+    没有正在下载的任务时返回空队列，避免下载跟踪器轮询时报错。
+    """
+    records = []
+    try:
+        torrents = DownloadChain().downloading()
+    except Exception:
+        # 下载器异常不影响接口返回，避免下载跟踪器报错
+        torrents = []
+    for torrent in torrents:
+        media = torrent.media or {}
+        tmdbid = media.get("tmdbid")
+        if not tmdbid:
+            continue
+        # 将tmdbid映射回订阅ID
+        subscribes = Subscribe.get_by_tmdbid(db, int(tmdbid))
+        if not subscribes:
+            continue
+        sub_id = subscribes[0].id
+        # 大小（字节）与剩余大小，Seerr据此计算下载百分比
+        size = int(torrent.size or 0)
+        progress = float(torrent.progress or 0)
+        sizeleft = int(size * (1 - progress / 100)) if size else 0
+        record = {
+            "id": sub_id,
+            "title": torrent.title or media.get("title"),
+            "size": size,
+            "sizeleft": sizeleft,
+            "status": "paused" if torrent.state == "paused" else "downloading",
+            "trackedDownloadStatus": "ok",
+            "trackedDownloadState": "downloading",
+            "timeleft": torrent.left_time or "",
+            "estimatedCompletionTime": datetime.now(timezone.utc).isoformat(),
+            "protocol": "torrent",
+            "downloadClient": torrent.downloader or "MoviePilot",
+            "downloadId": torrent.hash,
+            "indexer": "",
+        }
+        # Radarr按movieId关联、Sonarr按seriesId关联，按媒体类型设置对应字段
+        if media.get("type") == MediaType.TV.value:
+            record["seriesId"] = sub_id
+        else:
+            record["movieId"] = sub_id
+        records.append(record)
+    return {
+        "page": 1,
+        "pageSize": max(len(records), 20),
+        "sortKey": "timeleft",
+        "sortDirection": "ascending",
+        "totalRecords": len(records),
+        "records": records
     }
 
 
