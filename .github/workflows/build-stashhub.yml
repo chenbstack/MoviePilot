@@ -1,0 +1,62 @@
+name: Build and Push to stash-hub
+
+on:
+  # 手动触发
+  workflow_dispatch:
+  # 推送到当前修复分支时自动构建
+  push:
+    branches:
+      - fix/servarr-update-series-v2.9.11
+
+env:
+  REGISTRY: stash-hub.one
+  IMAGE: stash-hub.one/chenbstack/moviepilot
+
+jobs:
+  Docker-build:
+    runs-on: ubuntu-latest
+    name: Build Docker Image
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Release version
+        id: release_version
+        run: |
+          app_version=$(cat version.py | sed -ne "s/APP_VERSION\s=\s'v\(.*\)'/\1/gp")
+          echo "app_version=$app_version" >> $GITHUB_ENV
+
+      - name: Docker Meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ env.app_version }}
+            type=raw,value=latest
+
+      - name: Set Up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set Up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login stash-hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.STASH_HUB_USERNAME }}
+          password: ${{ secrets.STASH_HUB_PASSWORD }}
+
+      - name: Build Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          # 仅构建 amd64；如需 arm64 改为多行 linux/amd64 + linux/arm64/v8（QEMU 构建较慢）
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha, scope=${{ github.workflow }}-docker
+          cache-to: type=gha, scope=${{ github.workflow }}-docker
