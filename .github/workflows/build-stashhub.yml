@@ -35,8 +35,14 @@ jobs:
             type=raw,value=${{ env.app_version }}
             type=raw,value=latest
 
-      - name: Set Up QEMU
-        uses: docker/setup-qemu-action@v3
+      # stash-hub 后端无法承受多个大镜像层并发提交（会返回 502），
+      # 将 docker 上传并发降为 1，改用本地构建 + 串行 docker push 规避。
+      - name: Limit docker upload concurrency
+        run: |
+          echo '{ "max-concurrent-uploads": 1 }' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          # 等待 docker 重启完成
+          for i in $(seq 1 15); do docker info >/dev/null 2>&1 && break; sleep 2; done
 
       - name: Set Up Buildx
         uses: docker/setup-buildx-action@v3
@@ -48,18 +54,44 @@ jobs:
           username: ${{ secrets.STASH_HUB_USERNAME }}
           password: ${{ secrets.STASH_HUB_PASSWORD }}
 
-      - name: Build Image
+      - name: Build Image (load to local docker)
         uses: docker/build-push-action@v5
         with:
           context: .
           file: docker/Dockerfile
-          # 仅构建 amd64；如需 arm64 改为多行 linux/amd64 + linux/arm64/v8（QEMU 构建较慢）
+          # 仅构建 amd64；load 仅支持单平台
           platforms: linux/amd64
-          push: true
-          # 关闭 provenance/SBOM 证明清单，减少推送的 blob，提升对自建 registry 的兼容性
+          # 先加载到本地 docker，再用 docker push 串行推送
+          load: true
+          push: false
           provenance: false
           sbom: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha, scope=${{ github.workflow }}-docker
           cache-to: type=gha, scope=${{ github.workflow }}-docker
+
+      # 串行推送每个 tag，并对 502/瞬时失败做重试
+      - name: Push images (serialized with retry)
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -e
+          echo "$TAGS" | while read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "==> pushing $tag"
+            n=0
+            until [ $n -ge 6 ]; do
+              if docker push "$tag"; then
+                echo "==> pushed $tag"
+                break
+              fi
+              n=$((n+1))
+              echo "==> push failed ($tag), retry $n/6 in $((n*15))s"
+              sleep $((n*15))
+            done
+            if [ $n -ge 6 ]; then
+              echo "::error::failed to push $tag after retries"
+              exit 1
+            fi
+          done
